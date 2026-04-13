@@ -1,0 +1,56 @@
+# 本地密钥与覆盖配置（保留示例文件供衍生/复制）
+.env
+.env.*
+!.env.example
+
+# 依赖
+node_modules
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.tmp
+.temp
+*.tmp
+*.temp
+
+# Vite 缓存（根目录或子项目）
+.vite
+**/.vite
+
+# TypeScript 增量编译缓存（若后续启用 tsc --build）
+*.tsbuildinfo
+
+# 测试覆盖率
+coverage
+*.lcov
+.nyc_output
+
+# 操作系统
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 编辑器 / IDE
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 桌面端 Vite 生产构建（见 desktop/vite.config.ts → desktop/dist）
+desktop/dist
+
+# electron-builder 等打包输出（安装包、win-unpacked 等，默认在仓库根目录 dist/）
+dist
+release
+out
+build
