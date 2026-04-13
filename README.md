@@ -228,7 +228,7 @@ pnpm desktop:dev
 - **本仓库所对照/衍生的可运行实现**：[AICoderTudou/claude-code-tudou](https://github.com/AICoderTudou/claude-code-tudou)
 - **社区中标注的另一上游参考**：[instructkr/claw-code](https://github.com/instructkr/claw-code)
 
-关于本项目中 “普瑞赛斯（Priestess）” 相关的人物设定、艺术风格、世界观表达与命名参考，特此声明：其艺术来源与相关参考均来自**上海鹰角网络科技有限公司 (Hypergryph Network Technology Co., Ltd.)** 旗下游戏作品**《明日方舟》**及其官方衍生内容（包括但不限于官方公开素材、宣传文本与世界观设定）。
+关于本项目中 “普瑞赛斯（Priestess）” 相关的人物设定、艺术风格、世界观表达与命名参考，特此声明：其艺术来源与相关参考均来自**上海鹰角网络科技有限公司 (Hypergryph Network Technology Co., Ltd.)** 旗下游戏作品《**明日方舟**》及其官方衍生内容（包括但不限于官方公开素材、宣传文本与世界观设定）。
 
 ---
 
