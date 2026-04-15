@@ -43,6 +43,7 @@ type ChatSendResult = {
 };
 
 type DeltaPayload = { requestId: string; text: string };
+type ThinkingPayload = { requestId: string; text: string; eventType?: string };
 type StatusPayload = { busy: boolean; requestId: string };
 type ModelEntry = { id: string; name: string; provider: string };
 type PromptHistoryItem = { role: "user" | "assistant"; text: string };
@@ -73,6 +74,7 @@ declare global {
         error?: string;
       }>;
       onDelta: (handler: (payload: DeltaPayload) => void) => () => void;
+      onThinking: (handler: (payload: ThinkingPayload) => void) => () => void;
       onStatus: (handler: (payload: StatusPayload) => void) => () => void;
     };
   }

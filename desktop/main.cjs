@@ -259,6 +259,67 @@ function extractTextFromAssistant(message) {
     .join("");
 }
 
+function collectReadableText(value, depth = 0) {
+  if (depth > 2 || value == null) return "";
+  if (typeof value === "string") {
+    const s = value.trim();
+    return s.length > 0 ? s : "";
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = collectReadableText(item, depth + 1);
+      if (hit) return hit;
+    }
+    return "";
+  }
+  if (typeof value !== "object") return "";
+  const preferKeys = ["thinking", "reasoning", "text", "message", "content", "summary", "status"];
+  for (const key of preferKeys) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      const hit = collectReadableText(value[key], depth + 1);
+      if (hit) return hit;
+    }
+  }
+  return "";
+}
+
+function buildThinkingEventText(event) {
+  if (!event || typeof event !== "object") return "";
+  const eventType = `${event.type || ""}`;
+  if (!eventType) return "";
+  if (eventType === "content_block_start") {
+    const blockType = `${event?.content_block?.type || ""}`;
+    if (blockType === "tool_use") {
+      const toolName = `${event?.content_block?.name || ""}`.trim();
+      return toolName ? `准备调用工具：${toolName}` : "准备调用工具";
+    }
+    if (blockType === "thinking") return "开始思考";
+  }
+  if (eventType === "content_block_delta") {
+    const deltaType = `${event?.delta?.type || ""}`;
+    if (deltaType === "text_delta") return "";
+    if (deltaType === "thinking_delta") {
+      return `${event?.delta?.thinking || event?.delta?.text || ""}`.trim();
+    }
+    return "";
+  }
+  return "";
+}
+
+function extractThinkingFromAssistantMessage(message) {
+  if (!message || !Array.isArray(message.content)) return "";
+  const parts = [];
+  for (const block of message.content) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
+      parts.push(block.thinking.trim());
+    } else if (block.type === "redacted_thinking") {
+      parts.push("[模型思考内容已脱敏]");
+    }
+  }
+  return parts.join("\n");
+}
+
 function getToolArgsObject(obj) {
   if (!obj || typeof obj !== "object") return null;
   if (obj.arguments != null && typeof obj.arguments === "object") return obj.arguments;
@@ -1029,6 +1090,8 @@ async function sendViaClaudeCli({ prompt, model, requestId, sessionId, isResumin
   let sawAssistantMessage = false;
   let sawMessageStop = false;
   let sawResultEvent = false;
+  let lastThinkingSnapshot = "";
+  const toolJsonLensByIndex = Object.create(null);
 
   const args = buildCliArgs(sessionId, model, isResuming);
   // Use the selected workspace directory for local Ollama/CLI execution so current project files are available.
@@ -1079,6 +1142,31 @@ async function sendViaClaudeCli({ prompt, model, requestId, sessionId, isResumin
       sendEvent("chat:delta", { requestId, text: parsed.event.delta.text });
     }
 
+    if (parsed?.type === "stream_event") {
+      const thinkingText = buildThinkingEventText(parsed?.event);
+      if (thinkingText) {
+        sendEvent("chat:thinking", { requestId, text: thinkingText, eventType: `${parsed?.event?.type || ""}` });
+      }
+    }
+
+    if (
+      parsed?.type === "stream_event" &&
+      parsed?.event?.type === "content_block_delta" &&
+      parsed?.event?.delta?.type === "input_json_delta"
+    ) {
+      const idx = parsed.event.index ?? 0;
+      const pj = `${parsed.event.delta?.partial_json || ""}`;
+      const prev = toolJsonLensByIndex[idx] || 0;
+      if (pj.length > prev) {
+        toolJsonLensByIndex[idx] = pj.length;
+        if (prev === 0) {
+          sendEvent("chat:thinking", { requestId, text: "正在组装工具调用参数…" });
+        } else if (pj.length - prev >= 500) {
+          sendEvent("chat:thinking", { requestId, text: `工具参数接收中…（约 ${pj.length} 字符）` });
+        }
+      }
+    }
+
     if (parsed?.type === "stream_event" && parsed?.event?.type === "message_stop") {
       sawMessageStop = true;
     }
@@ -1087,6 +1175,14 @@ async function sendViaClaudeCli({ prompt, model, requestId, sessionId, isResumin
       const fullText = extractTextFromAssistant(parsed.message);
       if (fullText) lastAssistantText = fullText;
       sawAssistantMessage = true;
+      const thinkFull = extractThinkingFromAssistantMessage(parsed.message);
+      if (thinkFull.length > lastThinkingSnapshot.length) {
+        const delta = thinkFull.slice(lastThinkingSnapshot.length).trim();
+        lastThinkingSnapshot = thinkFull;
+        if (delta) {
+          sendEvent("chat:thinking", { requestId, text: delta, eventType: "assistant_thinking" });
+        }
+      }
     }
 
     if (parsed?.type === "result" && typeof parsed?.result === "string") {

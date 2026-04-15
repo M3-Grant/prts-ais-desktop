@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { marked } from "marked";
 import avatarRC from './assets/R-C.jpg';
 import avatarUser from './assets/OIP-C.jpg';
@@ -39,6 +39,8 @@ type ChatMessage = {
   text: string;
   responseState?: "streaming" | "complete" | "abnormal";
   responseReason?: string;
+  thinkingLog?: string[];
+  thinkingCollapsed?: boolean;
 };
 
 type PromptHistoryItem = {
@@ -77,6 +79,12 @@ const launchUIVisible = ref(false);
 const heroPulse = ref(false);
 const heroAnimating = ref<"" | "expand" | "shrink">("");
 const settingsAnimating = ref<"" | "expand" | "shrink">("");
+/** 窄屏：侧栏脱离文档流，点击展开为浮层 */
+const WORKBENCH_COMPACT_PX = 1080;
+const pageRef = ref<HTMLElement | null>(null);
+let pageResizeObserver: ResizeObserver | null = null;
+const workbenchCompact = ref(false);
+const settingsOverlayOpen = ref(false);
 const noticeText = ref("");
 const noticeType = ref<"ok" | "warn">("ok");
 /** 最近一次请求的解析诊断（表格展示） */
@@ -162,7 +170,13 @@ function roleLabel(role: MessageRole) {
 }
 
 function addMessage(role: MessageRole, text: string, meta?: Partial<ChatMessage>) {
-  const item: ChatMessage = { id: makeId(), role, text, ...(meta || {}) };
+  const item: ChatMessage = {
+    id: makeId(),
+    role,
+    text,
+    ...(role === "assistant" ? { thinkingLog: [], thinkingCollapsed: true } : {}),
+    ...(meta || {}),
+  };
   messages.value.push(item);
   return item.id;
 }
@@ -183,6 +197,39 @@ function responseStateLabel(m: ChatMessage) {
   if (m.responseState === "streaming") return "生成中";
   if (m.responseState === "abnormal") return "异常";
   return "完整";
+}
+
+function shouldShowThinkingPanel(m: ChatMessage) {
+  return m.role === "assistant" && Array.isArray(m.thinkingLog) && m.thinkingLog.length > 0;
+}
+
+function thinkingSummary(m: ChatMessage) {
+  const logs = m.thinkingLog || [];
+  if (!logs.length) return "暂无思考过程";
+  const latest = logs[logs.length - 1] || "";
+  const shown = latest.length > 56 ? `${latest.slice(0, 56)}...` : latest;
+  return shown || "思考进行中";
+}
+
+function pushThinkingLog(target: ChatMessage, rawText: string) {
+  const text = (rawText || "").replace(/\s+/g, " ").trim();
+  if (!text) return;
+  if (!target.thinkingLog) target.thinkingLog = [];
+  const logs = target.thinkingLog;
+  const last = logs[logs.length - 1] || "";
+  if (text === last) return;
+  if (logs.length > 0 && last.length < 80 && text.length < 80 && !/[。！？.!?]$/.test(last)) {
+    logs[logs.length - 1] = `${last} ${text}`.trim();
+    return;
+  }
+  logs.push(text);
+  if (logs.length > 80) logs.splice(0, logs.length - 80);
+}
+
+function onThinkingPanelToggle(m: ChatMessage, event: Event) {
+  const el = event.target as HTMLDetailsElement | null;
+  if (!el) return;
+  m.thinkingCollapsed = !el.open;
 }
 
 function buildPromptHistory(limit = 12): PromptHistoryItem[] {
@@ -338,9 +385,26 @@ function stripToolJsonForMarkdownDisplay(raw: string): string {
   return merged.join("\n").trim();
 }
 
+/** 将「整段为 summary 类 JSON」提升为正文 + 可折叠原始 JSON，避免单栏 code 块撑破布局 */
+function promoteLooseJsonAnswer(raw: string): string {
+  const t = `${raw || ""}`.trim();
+  if (!t) return raw;
+  const fenceOnly = /^```(?:json)?\s*([\s\S]*?)```\s*$/i.exec(t);
+  const inner = fenceOnly ? fenceOnly[1].trim() : "";
+  const candidate = inner || (t.startsWith("{") && t.endsWith("}") ? t : "");
+  if (!candidate) return raw;
+  const j = tryParseJsonObject(candidate);
+  if (!j || isToolLikeClient(j)) return raw;
+  const prose = extractProseFromToolPayloadClient(j);
+  if (!prose || prose.trim().length < 12) return raw;
+  const safeJson = escapeHtmlLite(JSON.stringify(j, null, 2));
+  return `${prose.trim()}\n\n<details class="raw-json-details"><summary>查看原始 JSON</summary>\n<pre class="json-raw-block"><code>${safeJson}</code></pre>\n</details>`;
+}
+
 function renderAssistantMarkdown(raw: string) {
   const rawStr = `${raw || ""}`;
-  const text = TOOL_JSON_OUTPUT_MASKING ? stripToolJsonForMarkdownDisplay(rawStr) : rawStr;
+  const stripped = stripToolJsonForMarkdownDisplay(rawStr);
+  const text = TOOL_JSON_OUTPUT_MASKING ? stripped : promoteLooseJsonAnswer(stripped);
   if (!text.trim()) {
     if (TOOL_JSON_OUTPUT_MASKING) {
       return `<p class="bubble-tool-hint">本回复仅为工具调用 JSON，已隐藏显示。可改问「请用中文概括 README 要点」或确认本地 Claude CLI 是否已执行工具链。</p>`;
@@ -924,11 +988,42 @@ function toggleHero() {
   setTimeout(() => (heroAnimating.value = ''), 420);
 }
 
+function syncWorkbenchCompact() {
+  const w = pageRef.value?.clientWidth ?? (typeof window !== "undefined" ? window.innerWidth : WORKBENCH_COMPACT_PX);
+  const next = w < WORKBENCH_COMPACT_PX;
+  if (next === workbenchCompact.value) return;
+  workbenchCompact.value = next;
+  settingsOverlayOpen.value = false;
+  settingsCollapsed.value = next ? true : false;
+}
+
 function toggleSettings() {
+  if (workbenchCompact.value) {
+    if (settingsOverlayOpen.value) {
+      settingsAnimating.value = "shrink";
+      settingsOverlayOpen.value = false;
+      settingsCollapsed.value = true;
+      setTimeout(() => (settingsAnimating.value = ""), 360);
+    } else {
+      settingsAnimating.value = "expand";
+      settingsOverlayOpen.value = true;
+      settingsCollapsed.value = false;
+      setTimeout(() => (settingsAnimating.value = ""), 360);
+    }
+    return;
+  }
   const wasCollapsed = settingsCollapsed.value;
   settingsCollapsed.value = !wasCollapsed;
   settingsAnimating.value = wasCollapsed ? 'expand' : 'shrink';
   setTimeout(() => (settingsAnimating.value = ''), 360);
+}
+
+function closeSettingsOverlay() {
+  if (!workbenchCompact.value || !settingsOverlayOpen.value) return;
+  settingsAnimating.value = "shrink";
+  settingsOverlayOpen.value = false;
+  settingsCollapsed.value = true;
+  setTimeout(() => (settingsAnimating.value = ""), 360);
 }
 
 watch([glassBannerOpacity, glassChatOpacity, glassSidebarOpacity], () => {
@@ -979,6 +1074,16 @@ onMounted(async () => {
   glassChatOpacity.value = readStoredGlass(GLASS_KEYS.chat, 42);
   glassSidebarOpacity.value = readStoredGlass(GLASS_KEYS.sidebar, 58);
 
+  await nextTick();
+  syncWorkbenchCompact();
+  if (typeof window !== "undefined") {
+    window.addEventListener("resize", syncWorkbenchCompact);
+  }
+  if (typeof ResizeObserver !== "undefined" && pageRef.value) {
+    pageResizeObserver = new ResizeObserver(() => syncWorkbenchCompact());
+    pageResizeObserver.observe(pageRef.value);
+  }
+
   const appState = await window.desktopApi.getState();
   sessionId.value = appState.sessionId || "";
   workspacePath.value = appState.workspacePath || "";
@@ -1009,6 +1114,14 @@ onMounted(async () => {
     }
   });
 
+  window.desktopApi.onThinking((payload) => {
+    if (!payload?.text) return;
+    const target = messages.value.find((m) => m.id === currentAssistantId.value);
+    if (!target || target.role !== "assistant") return;
+    pushThinkingLog(target, payload.text);
+    target.responseState = "streaming";
+  });
+
   window.desktopApi.onStatus((payload) => {
     if (payload && typeof payload.busy === "boolean") {
       isBusy.value = payload.busy;
@@ -1020,6 +1133,14 @@ onMounted(async () => {
   setTimeout(() => { heroLaunching.value = false; }, 3000);
 });
 
+onUnmounted(() => {
+  if (typeof window !== "undefined") {
+    window.removeEventListener("resize", syncWorkbenchCompact);
+  }
+  pageResizeObserver?.disconnect();
+  pageResizeObserver = null;
+});
+
 watch(
   messages,
   () => {
@@ -1028,10 +1149,19 @@ watch(
   },
   { deep: true },
 );
+
+watch(
+  () => launchUIVisible.value && !heroLaunching.value,
+  async (ready) => {
+    if (!ready) return;
+    await nextTick();
+    syncWorkbenchCompact();
+  },
+);
 </script>
 
 <template>
-  <div class="page" :style="pageGlassStyle">
+  <div ref="pageRef" class="page" :style="pageGlassStyle">
     <div v-if="heroLaunching" class="launch-overlay" aria-hidden>
       <div class="launch-title">普瑞赛斯</div>
     </div>
@@ -1046,18 +1176,40 @@ watch(
 
 
     <transition name="app-fade" appear>
-      <main v-show="launchUIVisible || !heroLaunching" class="workbench" :class="{ single: !showSettings, 'settings-collapsed': settingsCollapsed }"> 
-      <button v-if="showSettings" class="settings-toggle" @click="toggleSettings" :aria-expanded="!settingsCollapsed" :title="settingsCollapsed ? '展开快速配置' : '收起快速配置'">
-        <svg class="collapse-icon" :class="{ collapsed: settingsCollapsed }" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <path d="M8 5l8 7-8 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
-      </button>
+      <div
+        v-show="launchUIVisible || !heroLaunching"
+        class="workbench-shell"
+      >
+      <main
+        class="workbench"
+        :class="{
+          single: !showSettings,
+          compact: workbenchCompact,
+          'settings-collapsed': settingsCollapsed && !(workbenchCompact && settingsOverlayOpen),
+          'settings-overlay-open': workbenchCompact && settingsOverlayOpen,
+        }"
+      >
+      <div class="workbench-main">
       <section class="chat card">
         <div class="toolbar ios-bar">
           <div class="session ios-session-pill">会话：{{ sessionId || "未创建" }}</div>
-          <div class="actions">
-            <button type="button" class="ios-btn-secondary" @click="createSession" :disabled="isBusy">新会话</button>
-            <button type="button" class="danger ios-btn-danger" @click="stopMessage" :disabled="!isBusy">停止</button>
+          <div class="toolbar-trailing">
+            <div class="actions">
+              <button type="button" class="ios-btn-secondary" @click="createSession" :disabled="isBusy">新会话</button>
+              <button type="button" class="danger ios-btn-danger" @click="stopMessage" :disabled="!isBusy">停止</button>
+            </div>
+            <button
+              v-if="showSettings"
+              type="button"
+              class="settings-toggle"
+              @click="toggleSettings"
+              :aria-expanded="workbenchCompact ? settingsOverlayOpen : !settingsCollapsed"
+              :title="workbenchCompact ? (settingsOverlayOpen ? '关闭快速配置' : '打开快速配置（浮层）') : (settingsCollapsed ? '展开快速配置' : '收起快速配置')"
+            >
+              <svg class="collapse-icon" :class="{ collapsed: workbenchCompact ? !settingsOverlayOpen : settingsCollapsed }" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M8 5l8 7-8 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -1093,6 +1245,21 @@ watch(
                   </svg>
                 </button>
               </label>
+
+              <details
+                v-if="shouldShowThinkingPanel(m)"
+                class="thinking-panel"
+                :open="!m.thinkingCollapsed"
+                @toggle="onThinkingPanelToggle(m, $event)"
+              >
+                <summary class="thinking-summary">
+                  <span>思考过程（{{ (m.thinkingLog || []).length }}）</span>
+                  <span class="thinking-summary-text">{{ thinkingSummary(m) }}</span>
+                </summary>
+                <ol class="thinking-log">
+                  <li v-for="(line, idx) in (m.thinkingLog || [])" :key="`${m.id}-think-${idx}`">{{ line }}</li>
+                </ol>
+              </details>
 
               <template v-if="m.role === 'assistant' && m.id === currentAssistantId && isBusy && !(m.text || '').trim()">
                 <div class="thinking">
@@ -1136,8 +1303,29 @@ watch(
           </div>
         </div>
       </section>
+      </div>
 
-      <aside v-if="showSettings" :class="['settings card', { collapsed: settingsCollapsed, 'animating-expand': settingsAnimating === 'expand', 'animating-shrink': settingsAnimating === 'shrink' }]">
+      <div
+        v-if="workbenchCompact && settingsOverlayOpen"
+        class="settings-backdrop"
+        aria-hidden="true"
+        @click="closeSettingsOverlay"
+      />
+
+      <aside
+        v-if="showSettings && (!workbenchCompact || settingsOverlayOpen)"
+        :class="[
+          'settings',
+          'card',
+          {
+            collapsed: settingsCollapsed && !(workbenchCompact && settingsOverlayOpen),
+            'settings-floating': workbenchCompact,
+            'settings-floating-open': workbenchCompact && settingsOverlayOpen,
+            'animating-expand': settingsAnimating === 'expand',
+            'animating-shrink': settingsAnimating === 'shrink',
+          },
+        ]"
+      >
         <div class="settings-header">
           <h2>快速配置</h2>
         </div>
@@ -1355,6 +1543,7 @@ watch(
         </transition>
       </aside>
       </main>
+      </div>
     </transition>
   </div>
 </template>
@@ -1382,7 +1571,9 @@ watch(
   --glass-sidebar-strength: 0.58;
   --glass-sidebar-blur: 14px;
   height: 100%;
+  min-height: 100vh;
   padding: 20px;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -1392,6 +1583,7 @@ watch(
 }
 
 .hero {
+  flex-shrink: 0;
   border-radius: var(--ios-r-card);
   border: 1px solid rgba(12, 141, 240, 0.55);
   box-shadow: var(--ios-card-shadow);
@@ -1483,17 +1675,59 @@ watch(
   gap: 10px;
 }
 
+.workbench-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .workbench {
   flex: 1;
   min-height: 0;
   display: grid;
   grid-template-columns: 1fr auto;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
   gap: 12px;
   position: relative;
 }
 
+.workbench-main {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 1;
+}
+
 .workbench.single {
   grid-template-columns: 1fr;
+}
+
+.workbench.compact {
+  grid-template-columns: 1fr;
+}
+
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 78;
+  background: rgba(6, 4, 10, 0.52);
+  backdrop-filter: blur(2px);
+}
+
+.workbench > aside.settings:not(.settings-floating) {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 0;
+}
+
+.workbench.single > aside.settings:not(.settings-floating) {
+  grid-column: 1;
 }
 
 .card {
@@ -1506,10 +1740,13 @@ watch(
 }
 
 .chat {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   padding: 14px;
   gap: 12px;
+  min-width: 0;
   background: rgba(16, 11, 20, calc(0.5 * var(--glass-chat-strength)));
   backdrop-filter: saturate(calc(100% + 50% * var(--glass-chat-strength))) blur(var(--glass-chat-blur));
 }
@@ -1522,8 +1759,18 @@ aside.settings.card {
 .toolbar {
   display: flex;
   justify-content: space-between;
-  gap: 10px;
   align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.toolbar-trailing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .toolbar.ios-bar {
@@ -1571,6 +1818,7 @@ aside.settings.card {
   align-items: flex-start;
   gap: 10px;
   width: 100%;
+  min-width: 0;
   margin: 6px 0;
 }
 
@@ -1597,6 +1845,8 @@ aside.settings.card {
   color: #f4e6dc;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.22), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
   backdrop-filter: blur(10px);
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
 }
 
 .msg.user .bubble {
@@ -1657,6 +1907,74 @@ aside.settings.card {
   box-shadow: none;
 }
 
+.thinking-panel {
+  margin: 4px 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 9px;
+  background: rgba(12, 10, 16, 0.28);
+}
+
+.thinking-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  cursor: pointer;
+  color: #e9d7f5;
+  font-size: 12px;
+  user-select: none;
+}
+
+.thinking-summary-text {
+  color: rgba(236, 219, 246, 0.82);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 58%;
+  text-align: right;
+}
+
+.thinking-log {
+  margin: 0;
+  padding: 0 14px 10px 26px;
+  max-height: 140px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(243, 232, 247, 0.9);
+}
+
+.thinking-log li {
+  margin: 3px 0;
+}
+
+.bubble-md :deep(details.raw-json-details) {
+  margin-top: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.22);
+  padding: 6px 8px;
+}
+
+.bubble-md :deep(details.raw-json-details summary) {
+  cursor: pointer;
+  font-size: 12px;
+  color: #e8c8ff;
+  user-select: none;
+}
+
+.bubble-md :deep(.json-raw-block) {
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .resp-state {
   display: inline-block;
   margin-left: 8px;
@@ -1683,12 +2001,15 @@ aside.settings.card {
 .bubble pre {
   margin: 0;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   line-height: 1.6;
   color: #f4e6dc;
   font-family: inherit;
+  max-width: 100%;
   max-height: min(65vh, 520px);
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
   overscroll-behavior: contain;
 }
 
@@ -1696,6 +2017,7 @@ aside.settings.card {
   font-size: 14px;
   line-height: 1.55;
   word-break: break-word;
+  max-width: 100%;
   max-height: min(65vh, 520px);
   overflow-y: auto;
   overflow-x: hidden;
@@ -1751,7 +2073,10 @@ aside.settings.card {
   background: rgba(0, 0, 0, 0.32);
   border: 1px solid rgba(255, 255, 255, 0.08);
   overflow-x: auto;
-  white-space: pre;
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.45;
@@ -2135,15 +2460,48 @@ aside.settings.card {
   align-items: center;
 }
 
+/* 窄屏：覆盖 .settings 固定宽度，避免浮层仍占 360px */
+aside.settings.settings-floating {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  top: auto;
+  align-self: auto;
+  z-index: 86;
+  width: 48px;
+  max-height: min(560px, calc(100vh - 96px));
+  overflow: hidden;
+  transition: width 0.28s cubic-bezier(0.2, 0.9, 0.2, 1), box-shadow 0.28s ease;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.28);
+}
+
+aside.settings.settings-floating.settings-floating-open {
+  top: 72px;
+  bottom: 12px;
+  width: min(380px, calc(100vw - 28px));
+  max-height: calc(100vh - 88px);
+  overflow: hidden;
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.45);
+}
+
+aside.settings.settings-floating .settings-scroll {
+  max-height: calc(100vh - 200px);
+}
+
 .settings-header {
   height: 48px;
-  display:flex;
-  align-items:center;
-  justify-content:center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   position: relative;
 }
 
-.settings-header h2 { margin: 0; transition: transform 320ms ease; }
+.settings-header h2 {
+  margin: 0;
+  text-align: center;
+  transition: transform 320ms ease;
+}
 
 .settings.collapsed .settings-header h2 {
   transform: rotate(-90deg);
@@ -2321,11 +2679,9 @@ aside.settings.card {
 .app-fade-enter-active,
 .app-fade-leave-active { transition: opacity 420ms ease, transform 420ms ease; }
 
-/* settings toggle button positioned fixed relative to workbench so it won't jump */
+/* 侧栏展开/收起：放在聊天工具栏右侧，随窗口缩放对齐 */
 .settings-toggle {
-  position: absolute;
-  right: calc(12px + -1.5mm);
-  top: calc(16px - 2mm);
+  position: relative;
   width: 36px;
   height: 36px;
   border-radius: 11px;
@@ -2335,7 +2691,9 @@ aside.settings.card {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  z-index: 40;
+  flex-shrink: 0;
+  padding: 0;
+  margin: 0;
   cursor: pointer;
   transition: transform 200ms ease, background 200ms ease;
 }
@@ -2629,10 +2987,6 @@ button:disabled {
 
 @media (max-width: 1024px) {
   .flowbar {
-    grid-template-columns: 1fr;
-  }
-
-  .workbench {
     grid-template-columns: 1fr;
   }
 }

@@ -30,5 +30,6 @@ contextBridge.exposeInMainWorld("desktopApi", {
   clearModelSettings: () => ipcRenderer.invoke("settings:clearModel"),
   listModels: (payload) => ipcRenderer.invoke("models:list", payload),
   onDelta: (handler) => subscribe("chat:delta", handler),
+  onThinking: (handler) => subscribe("chat:thinking", handler),
   onStatus: (handler) => subscribe("chat:status", handler),
 });
