@@ -219,7 +219,7 @@ pnpm desktop:dev
 
 ---
 
-## 版权声明与来源（重要）
+## 版权声明与来源
 
 本 README 与仓库实践说明的整理，参考了哔哩哔哩公开视频：[BV1SU9jBAE48](https://www.bilibili.com/video/BV1SU9jBAE48)（请以 UP 主实际页面与标题为准）。
 
@@ -232,9 +232,11 @@ pnpm desktop:dev
 - **本仓库所对照/衍生的可运行实现**：[AICoderTudou/claude-code-tudou](https://github.com/AICoderTudou/claude-code-tudou)
 - **社区中标注的另一上游参考**：[instructkr/claw-code](https://github.com/instructkr/claw-code)
 
+关于本项目中 “普瑞赛斯（Priestess）” 相关的人物设定、艺术风格、世界观表达与命名参考，特此声明：其艺术来源与相关参考均来自**上海鹰角网络科技有限公司 (Hypergryph Network Technology Co., Ltd.)** 旗下游戏作品《**明日方舟**》及其官方衍生内容（包括但不限于官方公开素材、宣传文本与世界观设定）。
+
 ---
 
-## ⚠️ 关于权利与合规（非法律意见，请自行判断）
+## ⚠️ 关于权利与合规
 
 以下内容仅为项目说明，**不构成法律意见**；是否合法、如何合规，请你结合所在地法律与相关服务条款**自行判断**，并自担风险。
 
@@ -249,4 +251,4 @@ pnpm desktop:dev
 
 **本项目为独立开发的个人项目，仅用于学习交流。**
 
-**当前为私有仓库，仅授权指定协作者使用，禁止外传、商用，禁止用于任何生产环境。**
+**仅学习传播，禁止一切盈利行为，禁止用于任何生产环境。**
